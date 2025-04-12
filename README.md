@@ -188,6 +188,187 @@ leakpass.ql: Evaluation completed (183ms).
 Shutting down query evaluator.
 ```
 
+---
+
+## Query Usage Cases
+
+### Working with `DataFlow::Node`
+
+### 1. Check if a node is related to a specific function or variable
+
+#### A. Match a **specific function call**
+```ql
+FunctionCall fileFunc |
+  fileFunc.getTarget().hasName("open")
+```
+
+#### B. Match a **function name containing a substring** (case-insensitive)
+```ql
+FunctionCall fileFunc |
+  fileFunc.getTarget().getName().toLowerCase().matches("%open%")
+```
+
+#### C. Match a **variable name containing a substring**
+```ql
+Variable var |
+  var.getName().toLowerCase().matches("%key%")
+```
+
+#### D. Check if a node represents a variable **access**
+```ql
+node.asExpr() = var.getAnAccess()
+```
+
+#### E. Check if a node is the **right-hand side of an assignment** to a variable
+```ql
+AssignExpr ae |
+  ae.getLValue() = var.getAnAccess() and
+  node.asExpr() = ae.getRValue()
+```
+
+
+### 2. Data Flow
+
+Data flow analysis allows you to track how data moves through a program. This can help detect issues like sensitive data leakage, improper propagation of tainted input, or unexpected side effects.
+
+In CodeQL, **`DataFlow::Node`** is used to represent locations in code where data can flow *from* (sources) or *to* (sinks).
+
+
+#### A. Local Data Flow
+
+Local data flow tracks how values propagate **within a single function or basic block**. It’s useful for lightweight, fast analysis when you don't need full interprocedural flow.
+
+
+Local flow is ideal when:
+- You want **quick** and **lightweight** taint/data tracking
+- You're analyzing **well-isolated functions**
+- **Function calls**, **returns**, and **field accesses** are **not involved**
+
+> 🛑 Note: **Local flow does not** track across function boundaries, indirect calls, or return values. For those cases, use **Global Data Flow** or **TaintTracking**.
+
+
+##### Common Interface: `DataFlow::Node`
+
+In local flow (as with global flow), `DataFlow::Node` represents an abstract point in the code (like an expression, parameter, or value). You can project it back to code with helpful methods:
+
+```ql
+class DataFlow::Node {
+  /**
+   * Gets the expression corresponding to this node, if any.
+   */
+  Expr asExpr();
+
+  /**
+   * Gets an indirect (dereferenced) expression from this node.
+   * Index = number of dereference steps.
+   */
+  Expr asIndirectExpr(int index);
+
+  /**
+   * Gets the parameter corresponding to this node, if any.
+   */
+  Parameter asParameter();
+
+  /**
+   * Gets a dereferenced parameter at given index.
+   */
+  Parameter asParameter(int index);
+}
+```
+
+##### Local Flow Example Query
+
+Let’s say you want to check if a file pointer returned by `fopen()` is derived from another tainted source **within the same function**.
+
+```ql
+import cpp
+import semmle.code.cpp.dataflow.new.DataFlow
+
+from Function fopen, FunctionCall fc, Expr src, DataFlow::Node source, DataFlow::Node sink
+where
+  fopen.hasGlobalName("fopen") and
+  fc.getTarget() = fopen and
+  source.asIndirectExpr(1) = src and
+  sink.asIndirectExpr(1) = fc.getArgument(0) and
+  DataFlow::localFlow(source, sink)
+select src, "This expression flows into a file pointer argument."
+```
+
+Understading the flow:
+- `fopen.hasGlobalName("fopen")`: identifies the function `fopen`
+- `fc.getTarget() = fopen`: matches calls to `fopen`
+- `source.asIndirectExpr(1) = src`: gets a dereferenced expression (e.g., pointer data)
+- `sink.asIndirectExpr(1) = fc.getArgument(0)`: analyzes where the input to `fopen()` came from
+- `DataFlow::localFlow(source, sink)`: ensures the flow occurs **within one function**
+
+
+
+#### B. Global Data Flow
+Global data flow analysis follows values through:
+- variable assignments
+- function calls and returns
+- member accesses
+- control structures across multiple functions and files
+
+To use global data flow, you define a configuration module implementing `DataFlow::ConfigSig`.
+
+
+##### Required Predicates
+
+- `predicate isSource(DataFlow::Node source)`  
+  Defines where the data originates.  
+  Example: untrusted input from a file, network, or user.
+
+- `predicate isSink(DataFlow::Node sink)`  
+  Defines where data is *dangerous* or *sensitive* if it reaches.  
+  Example: writing to a sensitive variable or calling a security-sensitive function.
+
+##### Optional Predicates
+
+- `predicate isAdditionalFlowStep(DataFlow::Node pred, DataFlow::Node succ)`  
+  Specifies custom data flow transitions that aren't captured by default rules.  
+  Use this for tracking flow across unusual APIs or indirect expressions.
+
+- `predicate isBarrier(DataFlow::Node node)`  
+  Stops data from flowing through the given node.  
+  Useful for whitelisting, sanitizers, or modeling filtering logic.
+
+##### **Basic Query:**
+```ql
+import semmle.code.cpp.dataflow.new.DataFlow
+
+module MyFlowConfiguration implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node source) {
+    ...
+  }
+
+  predicate isSink(DataFlow::Node sink) {
+    ...
+  }
+}
+
+module MyFlow = DataFlow::Global<MyFlowConfiguration>;
+from DataFlow::Node source, DataFlow::Node sink
+where MyFlow::flow(source, sink)
+select sink, source, "Tainted data flows from here to a sink."
+```
+
+Understading the flow:
+- `flow(source, sink)` is true when data originating at `source` can reach `sink`.
+- CodeQL tracks intermediate expressions and control flow behind the scenes.
+- You can use `DataFlow::PathGraph` for visualizing full flow paths (great for debugging).
+
+
+
+#### Tips
+
+- Use `isAdditionalFlowStep` to track custom APIs
+- Use `isBarrier` for whitelisting or stopping taint propagation
+- Add `flowPath(source, sink)` to your query to get intermediate steps
+- Use `TaintTracking` module if you want built-in support for return flows and sanitizers
+
+---
+
 ## References
 - https://github.com/github/codeql-action/releases
 - https://codeql.github.com/docs/codeql-language-guides/analyzing-data-flow-in-cpp
