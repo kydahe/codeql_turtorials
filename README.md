@@ -244,7 +244,7 @@ Local flow is ideal when:
 - You're analyzing **well-isolated functions**
 - **Function calls**, **returns**, and **field accesses** are **not involved**
 
-> 🛑 Note: **Local flow does not** track across function boundaries, indirect calls, or return values. For those cases, use **Global Data Flow** or **TaintTracking**.
+> Note: **Local flow does not** track across function boundaries, indirect calls, or return values. For those cases, use **Global Data Flow** or **TaintTracking**.
 
 
 ##### Common Interface: `DataFlow::Node`
@@ -366,6 +366,55 @@ Understading the flow:
 - Use `isBarrier` for whitelisting or stopping taint propagation
 - Add `flowPath(source, sink)` to your query to get intermediate steps
 - Use `TaintTracking` module if you want built-in support for return flows and sanitizers
+
+---
+
+### Taint Analysis
+Taint analysis is a powerful static analysis technique that helps identify vulnerabilities caused by untrusted data flowing through a program into sensitive operations. In CodeQL, taint tracking is configured using taint sources, sinks, and optionally sanitizers, which are defined using special predicates or helper classes.
+
+#### TaintFunction
+
+In CodeQL, when you want to describe how taint flows through specific functions, you can subclass the `TaintFunction` class. This is useful for functions where the taint doesn't start or end, but passes through—such as strdup, which copies a string, or memcpy, which transfers memory contents.
+
+A `TaintFunction` tells the CodeQL engine how taint propagates from input parameters to output values for a given function. It is typically used in libraries or utility functions that don't themselves create vulnerabilities, but may pass tainted data along to other parts of the code.
+
+**Example: Modeling Taint Propagation in `strcpy`**
+
+The `strcpy` function copies a string from a **source** to a **destination**. If the source string (second parameter) is tainted, then:
+- The **destination** (first parameter) becomes tainted.
+- The **return value** (which is typically the same as the destination) is also tainted.
+
+Here’s how to model this behavior:
+```ql
+/**
+ * A TaintFunction that models the behavior of `strcpy`,
+ * where taint from the source parameter (param 1) flows to
+ * both the destination parameter (param 0) and the return value.
+ */
+class StrcpyFunction extends TaintFunction {
+  StrcpyFunction() {
+    this.hasName("strcpy")
+  }
+
+  override predicate hasTaintFlow(FunctionInput i, FunctionOutput o) {
+    i.isParameter(1) and
+    (
+      o.isParameter(0) or
+      o.isReturnValue()
+    )
+  }
+}
+```
+
+Understading the flow:
+
+- **`StrcpyFunction`** extends `TaintFunction` to describe how taint flows through the standard C function `strcpy`.
+- **`this.hasName("strcpy")`** binds this model to calls to the `strcpy` function.
+- **`i.isParameter(1)`** identifies the second argument (`src`), where the tainted data comes from.
+- **`o.isParameter(0)`** matches the first argument (`dest`), which gets tainted by the copy.
+- **`o.isReturnValue()`** indicates that the return value (which is usually the same as `dest`) also becomes tainted.
+
+This rule captures the behavior: _“If the source string is tainted, both the destination and the return value should be treated as tainted.”_
 
 ---
 
